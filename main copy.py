@@ -75,8 +75,6 @@ from pyniryo.api.objects import PoseObject
 import time
 import sys
 import logging
-import json
-import os
 
 
 # ==============================================================================
@@ -133,18 +131,21 @@ class SistemaVozOceanix:
 
         # Diccionario de mensajes optimizados (< 100 caracteres)
         self.mensajes = {
-            'inicio_sistema': 'Oceanix system operational.',
-            'ciclo_iniciado': 'Cycle started.',
-            'pieza_detectada': 'Part detected at feeder.',
-            'inspeccion_activa': 'Inspection window active. Seven seconds.',
-            'metal_detectado': 'Metal detected. Sending to discard.',
-            'no_metal_aceptado': 'Accepted material. Storing.',
-            'deposito_completado': 'Part stored in pallet.',
-            'ciclo_finalizado': 'Cycle completed.',
-            'error_recuperable': 'Recoverable error. Continuing.',
-            'pallet_completo': 'Pallet full. Manual unload needed.',
-            'calibracion_completada': 'Auto calibration finished.',
-            'estado_disponible': 'System ready for next cycle.'
+            'inicio_sistema': 'Sistema Oceanix operativo. Listo para clasificación automática.',
+            'ciclo_iniciado': 'Iniciando ciclo de clasificación industrial.',
+            'pieza_detectada': 'Pieza detectada en alimentador. Iniciando proceso.',
+            'recogida_exitosa': 'Pieza recogida correctamente.',
+            'inspeccion_activa': 'Inspección de calidad iniciada. Siete segundos.',
+            'metal_detectado': 'Material metálico detectado. Procediendo a descartes.',
+            'no_metal_aceptado': 'Material aceptado. Almacenamiento en pallet.',
+            'deposito_completado': 'Pieza almacenada correctamente en pallet.',
+            'ciclo_finalizado': 'Ciclo de clasificación completado exitosamente.',
+            'error_recuperable': 'Error recuperable detectado. Continuando operación.',
+            'pallet_completo': 'Almacén completo. Requiere vaciado manual.',
+            'conexion_exitosa': 'Conexión con robot Ned dos establecida.',
+            'calibracion_completada': 'Calibración automática completada.',
+            'estado_disponible': 'Sistema disponible para nueva clasificación.',
+            'parada_emergencia': 'Parada de emergencia activada. Sistema seguro.'
         }
 
     def _configurar_volumen(self):
@@ -344,7 +345,6 @@ class CeldaOceanix:
         self.ip_address = ip_address
         self.robot = None
         self.sistema_voz = None  # Se inicializa después de conectar
-        self.ruta_memoria = os.path.join(os.path.dirname(__file__), "memoria_oceanix.json")
 
         self.logger.info("=" * 60)
         self.logger.info("CONECTANDO CON ROBOT NED2 OCEANIX v2.3 (CORREGIDA)")
@@ -355,8 +355,6 @@ class CeldaOceanix:
         
         # --- MEMORIA DEL PALLET ---
         self.estado_pallet = [False, False, False]
-        self.piezas_descartadas = 0
-        self._cargar_memoria()
         
         # --- PINES COMUNICACIÓN (BIDIRECCIONAL) ---
         self.PIN_DI_MSB = "DI2"       # Arduino -> Ned2 (MSB)
@@ -441,6 +439,8 @@ class CeldaOceanix:
                 self.logger.info("[OK] Sistema de voz inicializado")
 
                 self.logger.info("--- CONEXIÓN EXITOSA ---")
+                # Anuncio de voz de conexión exitosa
+                self.sistema_voz.anunciar_evento('conexion_exitosa')
                 self.logger.info("\n")
                 return
                 
@@ -463,50 +463,6 @@ class CeldaOceanix:
         if isinstance(pose_list, PoseObject):
             return pose_list
         return PoseObject(*pose_list)
-
-    # ==========================================================================
-    # MEMORIA PERSISTENTE (JSON)
-    # ==========================================================================
-    def _cargar_memoria(self):
-        """Carga estado de pallet y descartes desde JSON."""
-        try:
-            if not os.path.exists(self.ruta_memoria):
-                self.logger.info("[MEMORIA] No existe memoria JSON, se usan valores por defecto.")
-                return
-
-            with open(self.ruta_memoria, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            estado = data.get("estado_pallet")
-            descartes = data.get("piezas_descartadas")
-
-            if isinstance(estado, list) and len(estado) == 3:
-                self.estado_pallet = [bool(x) for x in estado]
-            else:
-                self.logger.warning("[MEMORIA] estado_pallet inválido, se usa defecto.")
-
-            if isinstance(descartes, int) and descartes >= 0:
-                self.piezas_descartadas = descartes
-            else:
-                self.logger.warning("[MEMORIA] piezas_descartadas inválido, se usa defecto.")
-
-            self.logger.info(f"[MEMORIA] Cargada memoria: pallet={self.estado_pallet}, descartes={self.piezas_descartadas}")
-
-        except Exception as e:
-            self.logger.warning(f"[MEMORIA] Error cargando memoria JSON: {e}")
-
-    def _guardar_memoria(self):
-        """Guarda estado de pallet y descartes en JSON."""
-        try:
-            data = {
-                "estado_pallet": self.estado_pallet,
-                "piezas_descartadas": self.piezas_descartadas
-            }
-            with open(self.ruta_memoria, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=True, indent=2)
-            self.logger.debug("[MEMORIA] Memoria persistente guardada.")
-        except Exception as e:
-            self.logger.warning(f"[MEMORIA] Error guardando memoria JSON: {e}")
 
     # ==========================================================================
     # MÉTODOS: COMUNICACIÓN Y SENSORES
@@ -693,7 +649,6 @@ class CeldaOceanix:
                 resp = input(">> Escriba 'SI' cuando el pallet esté vacío: ").strip().upper()
                 if resp == "SI":
                     self.estado_pallet = [False, False, False]
-                    self._guardar_memoria()
                     self.logger.info("[OK] Sistema reiniciado. Pallet vacío.")
                     break
 
@@ -721,6 +676,10 @@ class CeldaOceanix:
             time.sleep(0.5)
             
             self.logger.info("[OK] Pieza recogida y pinza cerrada")
+
+            # Anuncio de voz de recogida exitosa
+            if self.sistema_voz:
+                self.sistema_voz.anunciar_evento('recogida_exitosa')
 
             return True
             
@@ -866,7 +825,6 @@ class CeldaOceanix:
             
             self.estado_pallet[slot_idx] = True
             self.logger.info("[OK] Pieza almacenada correctamente")
-            self._guardar_memoria()
 
             # Anuncio de voz de deposito completado
             if self.sistema_voz:
@@ -881,89 +839,6 @@ class CeldaOceanix:
             self.logger.error(f"Fallo al depositar en pallet: {e}")
             return False
 
-    # ==========================================================================
-    # MODO: CICLO DE BANDEJA COMPLETA (3 POSICIONES)
-    # ==========================================================================
-    def ejecutar_ciclo_bandeja(self):
-        """
-        Ejecuta ciclos consecutivos hasta completar los 3 slots del pallet.
-
-        Flujo:
-        - Reutiliza ejecutar_ciclo() para cada pieza
-        - Se detiene si no hay pieza o ocurre un error
-        - Al completar los 3 slots muestra menú de restablecimiento
-        """
-        self.logger.info("\n" + "="*60)
-        self.logger.info(" MODO BANDEJA: LLENADO DE 3 POSICIONES")
-        self.logger.info("="*60)
-
-        while not all(self.estado_pallet):
-            resultado = self.ejecutar_ciclo()
-
-            if resultado == "sin_pieza":
-                self.logger.info("[MODO BANDEJA] No se detectó pieza.")
-                reintentar = None
-                while True:
-                    print("No se detectó pieza. Opciones:")
-                    print("1. Probar detección nuevamente")
-                    print("2. Finalizar bucle")
-                    opcion = input(">> Opción: ").strip()
-                    if opcion == '1':
-                        reintentar = True
-                        self.logger.info("[MODO BANDEJA] Reintentando detección en el siguiente ciclo.")
-                        break
-                    elif opcion == '2':
-                        reintentar = False
-                        self.logger.info("[MODO BANDEJA] Usuario finaliza el bucle por falta de pieza.")
-                        break
-                    else:
-                        print("Opción inválida. Intente de nuevo.")
-                if not reintentar:
-                    break
-                else:
-                    continue
-            if resultado in ("error", "sin_slot"):
-                self.logger.info(f"[MODO BANDEJA] Bucle detenido (resultado={resultado}).")
-                break
-
-        if all(self.estado_pallet):
-            print("\nBandeja completada - Restablezca la bandeja.")
-            while True:
-                print("1. Bandeja restablecida")
-                print("2. Bandeja restablecida, iniciar ciclo nuevamente")
-                print("3. Bandeja no se puede restablecer, volver a home position")
-                opcion = input(">> Opción: ").strip()
-
-                if opcion == '1':
-                    self.estado_pallet = [False, False, False]
-                    self.logger.info("[MODO BANDEJA] Pallet limpiado por el usuario.")
-                    try:
-                        self._mover_con_validacion(self.POSE_HOME)
-                    except Exception:
-                        pass
-                    self.establecer_estado(self.ESTADO_DISPONIBLE)
-                    self._guardar_memoria()
-                    break
-                elif opcion == '2':
-                    self.estado_pallet = [False, False, False]
-                    self.logger.info("[MODO BANDEJA] Pallet limpiado. Reiniciando ciclos.")
-                    try:
-                        self._mover_con_validacion(self.POSE_HOME)
-                    except Exception:
-                        pass
-                    self.establecer_estado(self.ESTADO_DISPONIBLE)
-                    self._guardar_memoria()
-                    return self.ejecutar_ciclo_bandeja()
-                elif opcion == '3':
-                    self.logger.info("[MODO BANDEJA] Usuario no pudo restablecer. Volviendo a HOME.")
-                    try:
-                        self._mover_con_validacion(self.POSE_HOME)
-                    except Exception:
-                        pass
-                    self.establecer_estado(self.ESTADO_DISPONIBLE)
-                    break
-                else:
-                    print("Opción inválida. Intente de nuevo.")
     # ==========================================================================
     # MÉTODO PRINCIPAL: EJECUCIÓN DE CICLO COMPLETO
     # ==========================================================================
@@ -1049,9 +924,6 @@ class CeldaOceanix:
         - Sensores configurados correctamente
         - Coordenadas de trabajo válidas
         """
-        resultado_ciclo = "ok"  # ok | sin_pieza | sin_slot | error
-        detecta_metal = False
-
         self.logger.info("\n" + "="*60)
         self.logger.info(" INICIO CICLO OCEANIX v2.3")
         self.logger.info("="*60)
@@ -1071,7 +943,7 @@ class CeldaOceanix:
             if not self.hay_pieza_entrada():
                 self.logger.info("[INFO] No se detecta pieza. Esperando...")
                 self.establecer_estado(self.ESTADO_DISPONIBLE)
-                return "sin_pieza"
+                return
 
             self.logger.info("[OK] PIEZA DETECTADA")
 
@@ -1087,7 +959,7 @@ class CeldaOceanix:
                 if self.obtener_slot_libre() == -1:
                     self.logger.error("[ERROR] Almacén sin huecos. Ciclo abortado.")
                     self.establecer_estado(self.ESTADO_DISPONIBLE)
-                    return "sin_slot"
+                    return
 
             self.establecer_estado(self.ESTADO_OCUPADO)
 
@@ -1119,8 +991,6 @@ class CeldaOceanix:
                 
                 self.ir_a_destino_seguro(self.POSE_DESCARTES, self.APROX_DESCARTES)
                 self.robot.release_with_tool()
-                self.piezas_descartadas += 1
-                self._guardar_memoria()
                 self.logger.info("[OK] Pieza descartada")
                 self.salir_de_destino_seguro(self.APROX_DESCARTES)
             else:
@@ -1141,10 +1011,8 @@ class CeldaOceanix:
                             self.robot.move(self._pose(self.POSE_APROX_GENERAL))
                         except:
                             pass
-                        resultado_ciclo = "error"
                 else:
                     self.logger.error("[ERROR] No hay slots disponibles")
-                    resultado_ciclo = "sin_slot"
 
             # --- FIN DE CICLO ---
             self.logger.info("\n[FASE 6] Fin de ciclo")
@@ -1163,7 +1031,6 @@ class CeldaOceanix:
             self.logger.info("="*60)
             self.logger.info(" CICLO COMPLETADO")
             self.logger.info("="*60 + "\n")
-            return resultado_ciclo
 
         except Exception as e:
             self.logger.error(f"\n[ERROR] Interrupción en ciclo: {e}", exc_info=True)
@@ -1180,7 +1047,6 @@ class CeldaOceanix:
                 self._mover_con_validacion(self.POSE_HOME)
             except Exception as home_err:
                 self.logger.error(f"[ERROR CRÍTICO] No se puede alcanzar HOME: {home_err}")
-            return "error"
 
     # ==========================================================================
     # DESCONEXIÓN SEGURA
@@ -1189,6 +1055,10 @@ class CeldaOceanix:
         """Realiza desconexión segura del robot."""
         self.logger.info("\n--- INICIANDO DESCONEXIÓN SEGURA ---")
         try:
+            # Anuncio de voz de parada de emergencia si el sistema está operativo
+            if self.sistema_voz and self.robot:
+                self.sistema_voz.anunciar_evento('parada_emergencia')
+
             self.apagar_led()
             self.establecer_estado(self.ESTADO_INICIANDO)
 
@@ -1229,12 +1099,11 @@ if __name__ == '__main__':
 
         while True:
             print("\n========== MENÚ OCEANIX ==========")
-            print("1. Ejecutar Bandeja Completa (3 posiciones)")
-            print("2. Ejecutar Ciclo Único")
-            print("3. Ver estado Almacén")
-            print("4. Resetear Almacén")
-            print("5. Probar Sistema de Voz")
-            print("6. Salir")
+            print("1. Ejecutar Ciclo Completo")
+            print("2. Ver estado Almacén")
+            print("3. Resetear Almacén")
+            print("4. Probar Sistema de Voz")
+            print("5. Salir")
             
             try:
                 opcion = input(">> Opción: ").strip()
@@ -1242,39 +1111,34 @@ if __name__ == '__main__':
                 break
 
             if opcion == '1':
-                app.ejecutar_ciclo_bandeja()
-                
-            elif opcion == '2':
                 app.ejecutar_ciclo()
                 
-            elif opcion == '3':
+            elif opcion == '2':
                 ocupados = app.estado_pallet.count(True)
                 estado_visual = ["[*]" if x else "[ ]" for x in app.estado_pallet]
                 print(f"\n[INFO] Estado Pallet: {estado_visual}")
                 print(f"       Ocupados: {ocupados}/3 slots")
-                print(f"       Descartes totales: {app.piezas_descartadas}")
                 
-            elif opcion == '4':
+            elif opcion == '3':
                 resp = input("¿Seguro que quieres resetear el almacén? (SI/no): ").strip().upper()
                 if resp == "SI":
                     app.estado_pallet = [False, False, False]
-                    app._guardar_memoria()
                     print("[INFO] Almacén vaciado en memoria.")
                 
-            elif opcion == '5':
+            elif opcion == '4':
                 print("\n[INFO] Probando sistema de voz...")
                 print("Eventos disponibles:")
                 eventos_prueba = [
                     'inicio_sistema', 'ciclo_iniciado', 'pieza_detectada',
-                    'inspeccion_activa', 'metal_detectado', 'no_metal_aceptado',
-                    'deposito_completado', 'ciclo_finalizado', 'pallet_completo',
-                    'estado_disponible'
+                    'recogida_exitosa', 'inspeccion_activa', 'metal_detectado',
+                    'no_metal_aceptado', 'deposito_completado', 'ciclo_finalizado',
+                    'pallet_completo', 'estado_disponible'
                 ]
                 for i, evento in enumerate(eventos_prueba, 1):
                     print(f"{i}. {evento}")
 
                 try:
-                    num_evento = int(input(f"Seleccione evento (1-{len(eventos_prueba)}): ")) - 1
+                    num_evento = int(input("Seleccione evento (1-11): ")) - 1
                     if 0 <= num_evento < len(eventos_prueba):
                         evento_seleccionado = eventos_prueba[num_evento]
                         print(f"[INFO] Reproduciendo: {evento_seleccionado}")
@@ -1287,7 +1151,7 @@ if __name__ == '__main__':
                 except ValueError:
                     print("[ERROR] Ingrese un número válido")
 
-            elif opcion == '6':
+            elif opcion == '5':
                 print("[INFO] Saliendo del sistema...")
                 break
                 
