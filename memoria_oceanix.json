@@ -1,8 +1,8 @@
 {
   "estado_pallet": [
     true,
-    true,
+    false,
     false
   ],
-  "piezas_descartadas": 1
+  "piezas_descartadas": 4
 }

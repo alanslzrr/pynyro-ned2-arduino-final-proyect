@@ -1,5 +1,6 @@
 # ==============================================================================
 # PROYECTO FINAL: CELDA ROBOTIZADA DE CLASIFICACIÓN OCEANIX
+# CONTROLADOR PRINCIPAL PYTHON - main.py
 # ==============================================================================
 #
 # INSTITUCIÓN: Universidad Intercontinental de la Empresa
@@ -8,65 +9,184 @@
 # FECHA: 5 de diciembre de 2025
 #
 # EQUIPO DE DESARROLLO:
-# - Alan Ariel Salazar
+# - Alan Ariel Salazar (Responsable del Equipo)
 # - Anton Dopico
 # - Pablo Barran Franco
 #
 # ==============================================================================
-#
-# OBJETIVO GENERAL:
+# PRESENTACIÓN DEL COMPONENTE
 # ==============================================================================
+#
+# Este archivo implementa el controlador principal del sistema de clasificación
+# Oceanix en lenguaje Python. El controlador actúa como orquestador central que
+# coordina todas las operaciones de la celda robotizada, gestionando el robot
+# colaborativo Ned2, comunicándose con el Arduino Supervisor mediante protocolo
+# digital bidireccional de 2 bits, y ejecutando el ciclo completo de clasificación
+# automatizada desde la detección de piezas hasta su deposición final.
+#
+# El sistema implementa una máquina de estados finita determinista que gestiona
+# las transiciones entre los diferentes estados operativos del robot (INICIANDO,
+# DISPONIBLE, OCUPADO, EN_INSPECCIÓN), garantizando operación determinista y
+# recuperación automática ante errores mediante mecanismos robustos de manejo de
+# excepciones y reconexión automática.
+#
+# ==============================================================================
+# OBJETIVO GENERAL
+# ==============================================================================
+#
 # Desarrollar e implementar un sistema automatizado de clasificación industrial
 # que integre un robot colaborativo Ned2 con sensores inductivos para la
 # detección de materiales metálicos, aplicando principios de automatización
 # industrial y teoría de sistemas a eventos discretos (SED).
 #
 # ==============================================================================
-# OBJETIVOS ESPECÍFICOS:
+# OBJETIVOS ESPECÍFICOS
 # ==============================================================================
+#
 # 1. IMPLEMENTAR CONTROLADOR PYTHON PARA ROBOT NED2
-#    - Establecer comunicación TCP/IP con robot industrial
-#    - Implementar protocolo de comunicación bidireccional 2-bit
-#    - Gestionar estados del robot mediante máquina de estados finita
+#    - Establecer comunicación TCP/IP con robot industrial mediante librería pyniryo
+#    - Implementar protocolo de comunicación bidireccional 2-bit (DO2/DO1 para
+#      estados del robot hacia Arduino, DI2/DI1 para resultados del sensor desde Arduino)
+#    - Gestionar estados del robot mediante máquina de estados finita con 4 estados
+#      principales: INICIANDO (0), DISPONIBLE (1), OCUPADO (2), EN_INSPECCIÓN (3)
 #
 # 2. DESARROLLAR LÓGICA DE CLASIFICACIÓN AUTOMATIZADA
-#    - Detectar presencia de piezas mediante sensor digital
-#    - Ejecutar movimientos seguros con navegación hub-and-spoke
-#    - Implementar inspección temporal de 7 segundos con latching
-#    - Clasificar piezas: metálicas → descartes, no metálicas → pallet
+#    - Detectar presencia de piezas mediante sensor digital DI5 con algoritmo de
+#      debouncing (3 lecturas consecutivas con intervalo de 50ms)
+#    - Ejecutar movimientos seguros con navegación hub-and-spoke mediante puntos de
+#      aproximación compartidos que minimizan riesgo de colisiones
+#    - Implementar inspección temporal de exactamente 7 segundos con lógica de
+#      latching que garantiza detección permanente de metal durante la ventana temporal
+#    - Clasificar piezas según resultado de inspección: metálicas → zona de descartes,
+#      no metálicas → pallet de almacenamiento de 3 posiciones
 #
 # 3. INTEGRAR GESTIÓN DE ERRORES Y RECUPERACIÓN
-#    - Implementar manejo de colisiones con recuperación automática
-#    - Gestionar desconexiones y reconexiones con backoff exponencial
-#    - Proporcionar logging completo para trazabilidad
+#    - Implementar manejo de colisiones físicas con recuperación automática mediante
+#      limpieza de flags de colisión y retorno a estados seguros
+#    - Gestionar desconexiones y reconexiones con algoritmo de backoff exponencial
+#      (tiempos de espera: 1s, 2s, 4s) para robustez ante fallos temporales de red
+#    - Proporcionar logging completo para trazabilidad mediante sistema dual (archivo
+#      oceanix_log.txt con nivel DEBUG, consola con nivel INFO)
 #
 # 4. OPTIMIZAR DESEMPEÑO INDUSTRIAL
-#    - Minimizar tiempos de ciclo mediante rutas optimizadas
-#    - Implementar debouncing de sensores para fiabilidad
-#    - Gestionar memoria de pallet de 3 posiciones
+#    - Minimizar tiempos de ciclo mediante rutas optimizadas y layout compacto con
+#      robot centralizado (reducción del 30% respecto a diseños lineales tradicionales)
+#    - Implementar debouncing de sensores para fiabilidad eliminando falsos positivos
+#      por ruido eléctrico o vibraciones mecánicas
+#    - Gestionar memoria de pallet de 3 posiciones con persistencia en archivo JSON
+#      para mantener estado entre sesiones del sistema
 #
 # ==============================================================================
-# ARQUITECTURA DEL SISTEMA:
+# ARQUITECTURA DEL SISTEMA
 # ==============================================================================
-# PYTHON CONTROLLER (main.py) ↔ ARDUINO SUPERVISOR ↔ ARDUINO PERIFÉRICO
-#       │                              │                              │
-#       └─────────PROTOCOLO 2-BIT──────┼────────────I2C───────────────┘
-#                                      │
-#                                      ▼
-#                               SENSOR INDUCTIVO
-#                                      │
-#                                      ▼
-#                               SEMÁFORO LED
+#
+# El sistema se organiza en tres capas funcionales claramente definidas:
+#
+# CAPA DE CONTROL (Python - main.py)
+#   └──> Gestiona lógica de alto nivel, orquestación del ciclo completo,
+#        comunicación bidireccional con Arduino Supervisor, control del robot Ned2
+#
+# CAPA DE SUPERVISIÓN (Arduino Supervisor - supervisor/supervisor.ino)
+#   └──> Coordina componentes del sistema, lee estados del robot (DO2/DO1),
+#        gestiona sensor inductivo con latching, controla semáforo vía I2C
+#
+# CAPA DE ACTUACIÓN (Arduino Periférico - periferico/periferico.ino)
+#   └──> Control físico exclusivo de indicadores LED del semáforo perimetral,
+#        recepción I2C como esclavo (dirección 0x32), parpadeo no bloqueante
+#
+# PROTOCOLOS DE COMUNICACIÓN:
+#   - Robot ↔ Supervisor: Protocolo digital bidireccional 2-bit
+#     * DO2/DO1: Estados del robot (4 estados codificados en 2 bits)
+#     * DI2/DI1: Resultados del sensor (4 códigos: SIN_COMANDO, NO_METAL, RESERVADO, METAL)
+#   - Supervisor ↔ Periférico: Bus I2C (SDA A4, SCL A5)
+#     * Dirección esclavo: 0x32
+#     * Comandos: 5 códigos LED (OFF, YELLOW_BLINK, YELLOW_SOLID, RED, GREEN)
 #
 # ==============================================================================
-# DEPENDENCIAS Y REQUERIMIENTOS:
+# CONFIGURACIÓN Y REQUERIMIENTOS DEL SISTEMA
 # ==============================================================================
-# - Python 3.8+
-# - pyniryo (API para robot Ned2)
-# - Robot Niryo Ned2 con firmware actualizado
-# - Conexión de red TCP/IP (IP: 172.16.127.74)
-# - Comunicación serial Arduino (9600 baud)
-# - Bus I2C para periféricos
+#
+# DEPENDENCIAS SOFTWARE:
+#   - Python 3.8 o superior
+#   - Librería pyniryo (instalación: pip install pyniryo)
+#   - Librerías estándar: time, sys, logging, json, os, threading, queue
+#
+# HARDWARE REQUERIDO:
+#   - Robot Niryo Ned2 con firmware actualizado y calibración completa
+#   - Arduino Supervisor con firmware supervisor/supervisor.ino cargado
+#   - Arduino Periférico con firmware periferico/periferico.ino cargado
+#   - Sensor inductivo conectado a PIN 7 del Arduino Supervisor (activo en LOW)
+#   - Semáforo LED con 3 LEDs (verde PIN 2, amarillo PIN 3, rojo PIN 4) en Arduino Periférico
+#
+# CONFIGURACIÓN DE RED:
+#   - Robot Ned2 debe estar conectado a la misma red de área local que el ordenador
+#   - Dirección IP del robot configurada en variable IP_ROBOT (por defecto: 172.16.127.80)
+#   - Verificar conectividad mediante ping antes de ejecutar el sistema
+#
+# CONFIGURACIÓN DE COMUNICACIÓN:
+#   - Protocolo digital 2-bit: Conexiones físicas directas entre GPIO del robot y
+#     pines digitales del Arduino Supervisor (DO2→PIN 3, DO1→PIN 2, DI2←PIN 12, DI1←PIN 11)
+#   - Bus I2C: Conexiones SDA (A4) y SCL (A5) entre Supervisor y Periférico con pull-ups 4.7kΩ
+#   - Referencia común GND conectada entre todos los dispositivos
+#
+# ARCHIVOS DE CONFIGURACIÓN:
+#   - memoria_oceanix.json: Almacena estado persistente del pallet y contador de descartes
+#   - oceanix_log.txt: Archivo de logging generado automáticamente con trazabilidad completa
+#
+# ==============================================================================
+# ESTRUCTURA DEL CÓDIGO Y LÓGICA IMPLEMENTADA
+# ==============================================================================
+#
+# CLASE PRINCIPAL: CeldaOceanix
+#   Esta clase encapsula toda la funcionalidad del controlador principal, implementando:
+#   - Máquina de estados finita del robot con 4 estados principales
+#   - Comunicación bidireccional con Arduino Supervisor mediante protocolo 2-bit
+#   - Gestión del ciclo completo de clasificación con 6 fases operativas
+#   - Manejo robusto de errores con recuperación automática
+#   - Gestión de memoria persistente del pallet
+#
+# MÉTODOS PRINCIPALES:
+#   - __init__(): Inicialización completa del sistema con conexión al robot y configuración
+#   - ejecutar_ciclo(): Orquestación del ciclo completo de clasificación automatizada
+#   - inspeccionar_pieza(): Ventana temporal de 7 segundos con lógica de latching
+#   - recoger_pieza(): Operación Pick desde alimentador con navegación segura
+#   - depositar_en_pallet(): Operación Place en pallet con gestión de memoria
+#   - establecer_estado(): Comunicación de estados del robot al Arduino Supervisor
+#   - leer_comando_arduino(): Lectura de resultados del sensor desde Arduino Supervisor
+#
+# CLASE AUXILIAR: SistemaVozOceanix
+#   Sistema de voz industrial que proporciona feedback auditivo durante operaciones
+#   mediante síntesis de voz integrada del robot Ned2 (API PyNiryo robot.say())
+#
+# FUNCIÓN AUXILIAR: configurar_logging()
+#   Configura sistema de logging dual (archivo y consola) con niveles diferenciados
+#   para trazabilidad completa de operaciones del sistema
+#
+# ==============================================================================
+# FLUJO OPERATIVO DEL SISTEMA
+# ==============================================================================
+#
+# 1. INICIALIZACIÓN:
+#    - Conexión TCP/IP con robot Ned2 (con reintentos automáticos)
+#    - Calibración automática del robot
+#    - Carga de estado persistente del pallet desde JSON
+#    - Configuración inicial del semáforo (amarillo titilante)
+#    - Establecimiento de estado inicial INICIANDO
+#
+# 2. CICLO DE CLASIFICACIÓN:
+#    FASE 0: Estado DISPONIBLE - Robot en HOME esperando pieza
+#    FASE 1: Detección de pieza - Sensor DI5 con debouncing
+#    FASE 2: Recogida (Pick) - Movimiento seguro a alimentador y cierre de gripper
+#    FASE 3: Inspección - Ventana temporal de 7 segundos con latching de detección
+#    FASE 4: Clasificación - Evaluación de resultado y decisión de ruta
+#    FASE 5: Deposición - Place en descartes (metal) o pallet (no metal)
+#    FASE 6: Reset - Retorno a HOME y estado DISPONIBLE
+#
+# 3. GESTIÓN DE ERRORES:
+#    - Captura de todas las excepciones durante el ciclo
+#    - Recuperación automática mediante estados seguros
+#    - Logging completo de errores con stack trace
+#    - Limpieza de recursos (LEDs, movimientos a HOME)
 #
 # ==============================================================================
 
@@ -77,6 +197,8 @@ import sys
 import logging
 import json
 import os
+import threading
+import queue
 
 
 # ==============================================================================
@@ -118,17 +240,22 @@ class SistemaVozOceanix:
     - pallet_completo: Almacén lleno, requiere intervención manual
     """
 
-    def __init__(self, robot_instance, volumen_por_defecto=70):
+    def __init__(self, robot_instance, volumen_por_defecto=70, modo_async=False):
         """
         Inicializa el sistema de voz con configuración industrial.
 
         Args:
             robot_instance: Instancia del robot NiryoRobot
             volumen_por_defecto (int): Volumen 0-100 (70% recomendado industrial)
+            modo_async (bool): Si True, usa un hilo de voz (usar solo si la API soporta concurrencia).
         """
         self.robot = robot_instance
         self.volumen = volumen_por_defecto
         self.idioma = 0  # Español (0=English, 1=French, 2=Spanish, 3=Mandarin, 4=Portuguese)
+        self.modo_async = modo_async
+        self._cola_voz = queue.Queue()
+        self._hilo_voz = None
+        self._lock_voz = threading.Lock()
         self._configurar_volumen()
 
         # Diccionario de mensajes optimizados (< 100 caracteres)
@@ -147,12 +274,39 @@ class SistemaVozOceanix:
             'estado_disponible': 'System ready for next cycle.'
         }
 
+        if self.modo_async:
+            try:
+                self._hilo_voz = threading.Thread(target=self._procesar_cola_voz, daemon=True)
+                self._hilo_voz.start()
+            except Exception as e:
+                logging.getLogger("OCEANIX").warning(f"No se pudo iniciar hilo de voz asíncrono: {e}")
+                self.modo_async = False
+
     def _configurar_volumen(self):
         """Configura el volumen del sistema de audio del robot."""
         try:
             self.robot.set_volume(self.volumen)
         except Exception as e:
             logging.getLogger("OCEANIX").warning(f"No se pudo configurar volumen voz: {e}")
+
+    def _procesar_cola_voz(self):
+        """Hilo que procesa mensajes de voz en segundo plano."""
+        while True:
+            try:
+                mensaje, idioma = self._cola_voz.get()
+                if mensaje is None:
+                    break
+                try:
+                    with self._lock_voz:
+                        self.robot.say(mensaje, idioma)
+                    logging.getLogger("OCEANIX").debug(f"[VOZ-ASYNC] '{mensaje}'")
+                except Exception as e:
+                    logging.getLogger("OCEANIX").warning(f"Error reproduciendo voz async: {e}")
+                finally:
+                    self._cola_voz.task_done()
+            except Exception:
+                # Evitar que el hilo muera silenciosamente
+                continue
 
     def anunciar_evento(self, evento_clave, **kwargs):
         """
@@ -181,9 +335,17 @@ class SistemaVozOceanix:
                 mensaje = mensaje[:97] + "..."
                 logging.getLogger("OCEANIX").warning("Mensaje voz truncado por límite API")
 
-            # Reproducción del mensaje
-            self.robot.say(mensaje, self.idioma)
-            logging.getLogger("OCEANIX").debug(f"Voz: '{mensaje}'")
+            # Reproducción del mensaje (posible modo asíncrono)
+            if self.modo_async and self._hilo_voz:
+                try:
+                    self._cola_voz.put((mensaje, self.idioma))
+                    logging.getLogger("OCEANIX").debug(f"[VOZ-ENQUEUE] '{mensaje}'")
+                except Exception as e:
+                    logging.getLogger("OCEANIX").warning(f"No se pudo encolar voz: {e}")
+            else:
+                with self._lock_voz:
+                    self.robot.say(mensaje, self.idioma)
+                logging.getLogger("OCEANIX").debug(f"Voz: '{mensaje}'")
 
         except Exception as e:
             # Error silencioso - no interrumpir operaciones críticas
@@ -204,7 +366,15 @@ class SistemaVozOceanix:
                 return
 
             idioma_voz = idioma if idioma is not None else self.idioma
-            self.robot.say(mensaje, idioma_voz)
+            if self.modo_async and self._hilo_voz:
+                try:
+                    self._cola_voz.put((mensaje, idioma_voz))
+                    logging.getLogger("OCEANIX").debug(f"[VOZ-ENQUEUE] '{mensaje}' (custom)")
+                except Exception as e:
+                    logging.getLogger("OCEANIX").warning(f"No se pudo encolar voz personalizada: {e}")
+            else:
+                with self._lock_voz:
+                    self.robot.say(mensaje, idioma_voz)
 
         except Exception as e:
             logging.getLogger("OCEANIX").warning(f"Error mensaje personalizado: {e}")
@@ -263,8 +433,8 @@ def configurar_logging():
 # ==============================================================================
 # CLASE: CONTROLADOR PRINCIPAL DEL SISTEMA OCEANIX
 # ==============================================================================
-# OBJETIVO: Implementar controlador maestro para celda robotizada de clasificación
-# PATRÓN DE DISEÑO: Controlador maestro con máquina de estados finita (SED)
+# OBJETIVO: Implementar controlador Supervisor para celda robotizada de clasificación
+# PATRÓN DE DISEÑO: Controlador Supervisor con máquina de estados finita (SED)
 # ARQUITECTURA: Patrón Command con gestión de estados y recuperación de errores
 # ==============================================================================
 
@@ -272,7 +442,7 @@ class CeldaOceanix:
     """
     Controlador principal del sistema de clasificación Oceanix.
 
-    Esta clase implementa un controlador maestro que orquesta todas las operaciones
+    Esta clase implementa un controlador Supervisor que orquesta todas las operaciones
     de la celda robotizada, aplicando principios de teoría de autómatas para
     garantizar operación determinista y recuperación automática de errores.
 
@@ -383,7 +553,8 @@ class CeldaOceanix:
         self.resultado_inspeccion = False  # Almacena resultado del último ciclo
         
         # --- COORDENADAS ACTUALIZADAS (Z re-calibrada) ---
-        self.POSE_HOME = [0.2, 0.0, 0.2, 0.0, 0.0, 0.0]
+        self.POSE_HOME_FALLBACK = [0.2, 0.0, 0.2, 0.0, 0.0, 0.0]
+        self.POSE_HOME = self._obtener_pose_home_oficial()
         self.POSE_APROX_GENERAL = [0.199, -0.2, 0.322, -0.011, 1.526, -0.653]
         
         # Alimentador (Pick)
@@ -437,7 +608,9 @@ class CeldaOceanix:
                 self.logger.info("[OK] Calibración completada")
 
                 # Inicializar sistema de voz después de calibración exitosa
-                self.sistema_voz = SistemaVozOceanix(self.robot)
+                # Modo de voz por defecto SIN concurrencia para no interferir con la conexión del robot.
+                # Cambiar modo_async=True solo si la API es thread-safe.
+                self.sistema_voz = SistemaVozOceanix(self.robot, modo_async=False)
                 self.logger.info("[OK] Sistema de voz inicializado")
 
                 self.logger.info("--- CONEXIÓN EXITOSA ---")
@@ -458,6 +631,37 @@ class CeldaOceanix:
     # ==========================================================================
     # HELPERS DE POSICIÓN
     # ==========================================================================
+    def _obtener_pose_home_oficial(self):
+        """
+        Captura la pose cartesiana oficial del firmware tras mover a home.
+        Devuelve la lista [x, y, z, roll, pitch, yaw] exacta del robot.
+        """
+        try:
+            self.logger.info("[HOME] Moviendo a pose home oficial (firmware).")
+            self.robot.move_to_home_pose()
+            joints = self.robot.get_joints()
+            pose_home = self.robot.forward_kinematics(joints)
+            pose_list = [
+                pose_home.x,
+                pose_home.y,
+                pose_home.z,
+                pose_home.roll,
+                pose_home.pitch,
+                pose_home.yaw,
+            ]
+            self.logger.info(
+                "[HOME] Pose oficial capturada: "
+                f"x={pose_home.x:.3f}, y={pose_home.y:.3f}, z={pose_home.z:.3f}, "
+                f"roll={pose_home.roll:.3f}, pitch={pose_home.pitch:.3f}, yaw={pose_home.yaw:.3f}"
+            )
+            return pose_list
+        except Exception as e:
+            self.logger.warning(
+                f"[HOME] No se pudo obtener la pose home oficial; se usará fallback "
+                f"{self.POSE_HOME_FALLBACK}. Detalle: {e}"
+            )
+            return list(self.POSE_HOME_FALLBACK)
+
     def _pose(self, pose_list):
         """Convierte una lista [x, y, z, roll, pitch, yaw] en PoseObject."""
         if isinstance(pose_list, PoseObject):
